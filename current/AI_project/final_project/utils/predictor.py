@@ -3,6 +3,11 @@ import json
 import joblib
 import pandas as pd
 import numpy as np
+
+# Workaround for XGBoost on NumPy 2.0 (np.NaN was removed)
+if not hasattr(np, "NaN"):
+    np.NaN = np.nan
+
 import xgboost as xgb
 import streamlit as st
 
@@ -37,26 +42,31 @@ def get_risk_level(score):
     if score < 75: return "High"
     return "Critical"
 
-def predict_it_risk(features_dict):
+def predict_it_risk(features_dict, skip_api: bool = False):
     """
     Predicts risk for IT projects. Uses backend FastAPI API endpoint when active,
     with fallback to local XGBoost engine.
     """
     # 1. Try FastAPI Backend API first
-    try:
-        from utils.api_client import backend_health, api_predict_it_risk
-        api_base = st.session_state.get("api_base", "http://127.0.0.1:8000")
-        if backend_health(api_base):
-            api_res = api_predict_it_risk(features_dict, base_url=api_base)
-            if api_res and "risk_score" in api_res:
-                return api_res
-    except Exception:
-        pass
+    if not skip_api:
+        try:
+            from utils.api_client import backend_health, api_predict_it_risk
+            api_base = "http://127.0.0.1:8000"
+            try:
+                api_base = st.session_state.get("api_base", api_base)
+            except Exception:
+                pass
+            if backend_health(api_base):
+                api_res = api_predict_it_risk(features_dict, base_url=api_base)
+                if api_res and "risk_score" in api_res:
+                    return _enrich_prediction(api_res, features_dict)
+        except Exception:
+            pass
 
     # 2. Local XGBoost Engine Fallback
     model, f_names, f_types = load_it_model()
     if not model or not f_names:
-        return {"risk_score": 50.0, "risk_level": "Medium"}
+        return _enrich_prediction({"risk_score": 50.0, "risk_level": "Medium"}, features_dict)
 
     df = pd.DataFrame([features_dict])
     cat_cols = [c for c, t in zip(f_names, f_types) if t == "c"]
@@ -76,26 +86,31 @@ def predict_it_risk(features_dict):
     dmat = xgb.DMatrix(df, enable_categorical=True)
     pred = model.predict(dmat)[0]
     score = float(max(0, min(100, pred)))
-    
-    return {
+    payload = {
         "risk_score": round(score, 1),
         "risk_level": get_risk_level(score)
     }
+    return _enrich_prediction(payload, features_dict, model=model, dmat=dmat, feature_names=f_names)
 
-def predict_non_it_risk(features_dict):
+def predict_non_it_risk(features_dict, skip_api: bool = False):
     """
     Predicts risk for Non-IT projects using ML model pipeline with fallback to dynamic risk telemetry.
     """
     # 1. Try FastAPI Backend API first
-    try:
-        from utils.api_client import backend_health, api_predict_non_it_risk
-        api_base = st.session_state.get("api_base", "http://127.0.0.1:8000")
-        if backend_health(api_base):
-            api_res = api_predict_non_it_risk(features_dict, base_url=api_base)
-            if api_res and "risk_score" in api_res and api_res["risk_score"] > 0:
-                return api_res
-    except Exception:
-        pass
+    if not skip_api:
+        try:
+            from utils.api_client import backend_health, api_predict_non_it_risk
+            api_base = "http://127.0.0.1:8000"
+            try:
+                api_base = st.session_state.get("api_base", api_base)
+            except Exception:
+                pass
+            if backend_health(api_base):
+                api_res = api_predict_non_it_risk(features_dict, base_url=api_base)
+                if api_res and "risk_score" in api_res and api_res["risk_score"] > 0:
+                    return _enrich_prediction(api_res, features_dict)
+        except Exception:
+            pass
 
     # 2. Local Model Engine Fallback
     model = load_non_it_model()
@@ -143,7 +158,80 @@ def predict_non_it_risk(features_dict):
     if score <= 0.0:
         score = 45.0
 
-    return {
+    return _enrich_prediction({
         "risk_score": round(score, 1),
         "risk_level": get_risk_level(score)
-    }
+    }, features_dict)
+
+
+def _band_probabilities(score: float) -> dict:
+    """Soft class distribution around the existing 0-100 score. Does not change the predicted class."""
+    centers = {"Low": 15.0, "Medium": 42.0, "High": 65.0, "Critical": 87.0}
+    weights = {}
+    for name, center in centers.items():
+        dist = abs(score - center)
+        weights[name] = float(np.exp(-((dist / 18.0) ** 2)))
+    total = sum(weights.values()) or 1.0
+    return {k: round(v / total, 4) for k, v in weights.items()}
+
+
+def _confidence_from_score(score: float, probs: dict, level: str) -> float:
+    p = float(probs.get(level, 0.0))
+    # Distance from nearest threshold (30, 55, 75)
+    thresholds = [30.0, 55.0, 75.0]
+    dist = min(abs(score - t) for t in thresholds)
+    margin = min(1.0, dist / 12.0)
+    return round(max(0.35, min(0.95, 0.45 * p + 0.50 * margin + 0.05)), 3)
+
+
+def _enrich_prediction(payload, features_dict, model=None, dmat=None, feature_names=None):
+    """Add class, confidence, probabilities, and contributing factors without retraining."""
+    if not isinstance(payload, dict):
+        return payload
+    score = float(payload.get("risk_score", 50.0) or 50.0)
+    level = payload.get("risk_level") or get_risk_level(score)
+    probs = payload.get("probabilities") or _band_probabilities(score)
+    out = dict(payload)
+    out["risk_level"] = level
+    out["predicted_class"] = level
+    out["probabilities"] = probs
+    out["confidence"] = payload.get("confidence") or _confidence_from_score(score, probs, level)
+    if not out.get("contributing_factors"):
+        out["contributing_factors"] = _contributing_factors(features_dict or {}, model, dmat, feature_names)
+    return out
+
+
+def _contributing_factors(features_dict, model=None, dmat=None, feature_names=None):
+    factors = []
+    if model is not None and dmat is not None and feature_names:
+        try:
+            contrib = model.predict(dmat, pred_contrib=True)[0]
+            pairs = list(zip(feature_names, contrib[:-1] if len(contrib) == len(feature_names) + 1 else contrib))
+            pairs.sort(key=lambda x: abs(float(x[1])), reverse=True)
+            for name, val in pairs[:8]:
+                factors.append({
+                    "feature": name,
+                    "name": name,
+                    "contribution": round(float(val), 4),
+                    "impact": "increases risk" if float(val) > 0 else "decreases risk",
+                })
+            if factors:
+                return factors
+        except Exception:
+            pass
+    ranked = []
+    for key, val in (features_dict or {}).items():
+        try:
+            ranked.append((key, abs(float(val))))
+        except (TypeError, ValueError):
+            continue
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    for key, _ in ranked[:8]:
+        factors.append({
+            "feature": key,
+            "name": key,
+            "contribution": features_dict.get(key),
+            "impact": "input attribute",
+        })
+    return factors
+

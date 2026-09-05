@@ -25,3 +25,7 @@ xgboost
 catboost
 google-genai
 qdrant-client
+
+PyMuPDF>=1.23.0
+Pillow>=10.0.0
+python-pptx>=0.6.23

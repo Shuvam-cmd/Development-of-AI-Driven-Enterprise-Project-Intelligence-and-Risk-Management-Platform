@@ -9,7 +9,10 @@ from app.api.endpoints import (
     deadline,
     scenario,
     recommendations,
-    ai_analytics
+    ai_analytics,
+    auth,
+    documents,
+    chat,
 )
 
 api_router = APIRouter()
@@ -25,4 +28,8 @@ api_router.include_router(deadline.router, tags=["Deadline Analysis"])
 api_router.include_router(scenario.router, tags=["What-If Scenario Simulation"])
 api_router.include_router(recommendations.router, tags=["Preventive Recommendations"])
 api_router.include_router(ai_analytics.router, tags=["AI Analytics API"])
+api_router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+api_router.include_router(documents.router, prefix="/documents", tags=["Documents"])
+api_router.include_router(chat.router, prefix="/chats", tags=["Chat History"])
+
 

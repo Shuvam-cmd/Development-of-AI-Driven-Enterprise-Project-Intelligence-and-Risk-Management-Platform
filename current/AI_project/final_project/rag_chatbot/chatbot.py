@@ -10,29 +10,17 @@ import os
 from utils.local_ai import local_answer
 
 from . import config
-
-_client = None
-
-SYSTEM_INSTRUCTION = (
-    "You are an elite AI Project Intelligence Advisor powered by Gemini. Generate a thorough, comprehensive, "
-    "highly detailed, real, authentic, and context-aware executive intelligence response strictly grounded in the provided "
-    "project document excerpts and conversation history.\n\n"
-    "RESPONSE INSTRUCTIONS:\n"
-    "1. Directly answer the user's question with deep narrative analysis and comprehensive detail derived strictly from the document excerpts.\n"
-    "2. Provide complete explanations, data tables, bulleted lists, and strategic insights for specific queries (e.g. budget, timeline, risks, deliverables, vendors).\n"
-    "3. Keep the tone academic, objective, executive-ready, and professional. Avoid decorative emojis or superficial placeholders.\n"
-    "4. CITATION STYLE: Keep the main body clean, polished, and readable. Do NOT insert inline source tags like '[Source: ...]' after every sentence or line. If helpful, you may include a single small, subtle citation line at the very end (e.g., '*Source Document: filename.pdf*').\n"
-    "5. Synthesize context-aware insights across conversation turns when answering follow-up questions."
+from .grounding import (
+    MISSING_INFO_ANSWER,
+    OUT_OF_SCOPE_ANSWER,
+    SYSTEM_INSTRUCTION,
+    build_sources,
+    classify_question,
+    format_ml_context,
+    is_greeting,
 )
 
-
-def _is_greeting(question: str) -> bool:
-    q = question.strip().lower()
-    greetings = {
-        "hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening", 
-        "who are you", "what can you do", "help", "thanks", "thank you", "hi there", "hello there"
-    }
-    return q in greetings or q.startswith(("hi ", "hello ", "hey "))
+_client = None
 
 
 def _get_client() -> genai.Client:
@@ -53,10 +41,10 @@ def _build_context(chunks: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def _build_prompt(question: str, context: str, history: list[dict] = None) -> str:
+def _build_prompt(question: str, context: str, history: list[dict] = None, ml_context: str = "") -> str:
     history_str = ""
     if history:
-        recent = [m for m in history if m.get("content")][-6:]
+        recent = [m for m in history if m.get("content")][-8:]
         if recent:
             lines = []
             for m in recent:
@@ -64,66 +52,110 @@ def _build_prompt(question: str, context: str, history: list[dict] = None) -> st
                 lines.append(f"{role}: {m.get('content')}")
             history_str = "Recent Conversation History:\n" + "\n".join(lines) + "\n\n"
 
+    ml_block = f"System / ML context:\n{ml_context}\n\n" if ml_context else ""
     return (
         f"{history_str}"
-        f"Project document excerpts:\n{'-' * 40}\n{context}\n{'-' * 40}\n\n"
+        f"{ml_block}"
+        f"Project document excerpts (may come from multiple files):\n{'-' * 40}\n{context}\n{'-' * 40}\n\n"
         f"User Question: {question}\n\n"
-        f"Provide a clear, accurate, thorough, context-aware answer strictly based on the excerpts and conversation history above."
+        f"Answer only from the excerpts, conversation history, and labeled ML/system context. "
+        f"If those sources do not contain the answer, say you could not find it."
     )
 
 
-def answer_with_context(question: str, chunks: list[dict], history: list[dict] = None) -> dict:
+def answer_with_context(
+    question: str,
+    chunks: list[dict],
+    history: list[dict] = None,
+    project: dict = None,
+    prediction: dict = None,
+) -> dict:
     """
-    Generate a structured, real, authentic answer using Gemini LLM given pre-retrieved chunks and conversation history.
+    Generate a grounded answer from retrieved chunks, optional ML forecast, and conversation history.
+    Does not retrain or replace the XGBoost forecasting pipeline.
     """
-    if _is_greeting(question):
-        doc_name = chunks[0]["filename"] if chunks else "your project dossier"
+    kind = classify_question(question, history)
+    if kind == "greeting" or is_greeting(question):
         return {
             "answer": (
-                f"### Welcome to Project Intelligence AI Advisor\n\n"
-                f"Hello! I am your AI Project Advisor powered by Gemini, fully grounded in **{doc_name}**.\n\n"
-                f"I can help you analyze:\n"
-                f"* **Financials & Costs:** Capital allocations, budget variances, and spending.\n"
-                f"* **Schedule & Milestones:** Sprint dates, delivery targets, and project delays.\n"
-                f"* **Risk & Mitigation:** Identified threat vectors, severities, and governance controls.\n"
-                f"* **Scope & Stakeholders:** Core deliverables, microservices, and vendor SLAs.\n\n"
-                f"What would you like to explore regarding your project today?"
-            ),
-            "sources": sorted({c["filename"] for c in chunks}) if chunks else [],
-        }
-
-    if not chunks:
-        return {
-            "answer": (
-                "### No Document Context Found\n\n"
-                "> **Key Finding:** No relevant document excerpts located.\n\n"
-                "I couldn't locate relevant sections in your uploaded documents to answer this question confidently. "
-                "Please make sure you have uploaded and processed a project document."
+                "Hello. I answer from your uploaded project documents, stored project data, "
+                "and the existing XGBoost risk forecast when available. "
+                "Ask about risks, documents, predictions, or project information."
             ),
             "sources": [],
+            "source_details": [],
+            "question_kind": kind,
+        }
+
+    ml_context = format_ml_context(prediction, project)
+    used_ml = bool(ml_context) and any(
+        w in (question or "").lower()
+        for w in ("predict", "forecast", "classif", "xgboost", "confidence", "contribut", "why", "risk level", "probability")
+    )
+    if kind == "unrelated" and not used_ml:
+        return {
+            "answer": OUT_OF_SCOPE_ANSWER,
+            "sources": [],
+            "source_details": [],
+            "question_kind": kind,
+        }
+
+    if not chunks and not ml_context:
+        return {
+            "answer": "This question doesn't appear to be covered by the uploaded document(s). Please rephrase your question, or ask about risks, project details, or other available information.",
+            "sources": [],
+            "source_details": [],
+            "question_kind": kind,
+        }
+
+    if not chunks and ml_context and not used_ml and kind != "related":
+        return {
+            "answer": "This question doesn't appear to be covered by the uploaded document(s). Please rephrase your question, or ask about risks, project details, or other available information.",
+            "sources": [],
+            "source_details": [],
+            "question_kind": kind,
+        }
+
+    source_details = build_sources(chunks, used_ml=bool(ml_context and (used_ml or kind == "related")))
+    filenames = [s["filename"] for s in source_details if s.get("type") == "document"]
+
+    def _pack(answer: str) -> dict:
+        return {
+            "answer": answer,
+            "sources": filenames,
+            "source_details": source_details,
+            "question_kind": kind,
         }
 
     use_cloud = os.environ.get("USE_CLOUD_AI", "true").lower() in ("true", "1", "yes")
+    context = _build_context(chunks) if chunks else "(no document excerpts retrieved)"
+    prompt = _build_prompt(question, context, history=history, ml_context=ml_context)
+
     if not use_cloud or not config.GEMINI_API_KEY:
-        return local_answer(question, chunks, history=history)
+        if not chunks:
+            if ml_context and used_ml:
+                return _pack(
+                    "**ML Prediction**\n\n"
+                    + ml_context
+                    + "\n\n**AI Recommendation**\n\nThis explanation uses the stored XGBoost forecast only. "
+                    "No matching document excerpts were retrieved."
+                )
+            return _pack(MISSING_INFO_ANSWER)
+        local = local_answer(question, chunks, history=history)
+        local["source_details"] = source_details
+        local["question_kind"] = kind
+        return local
 
-    context = _build_context(chunks)
-    prompt = _build_prompt(question, context, history=history)
-
-    # Candidate Gemini models for robust fallback execution
     candidate_models = [
         config.GEMINI_LLM_MODEL,
         "gemini-3.5-flash",
         "gemini-3.5-flash-lite",
         "gemini-3.7-flash"
     ]
-    # Remove duplicates preserving order
     seen = set()
     models_to_try = [m for m in candidate_models if m and not (m in seen or seen.add(m))]
 
     client = _get_client()
-    last_error = None
-
     for model_name in models_to_try:
         try:
             response = client.models.generate_content(
@@ -132,16 +164,17 @@ def answer_with_context(question: str, chunks: list[dict], history: list[dict] =
                 config={"system_instruction": SYSTEM_INSTRUCTION}
             )
             if response and response.text:
-                return {
-                    "answer": response.text,
-                    "sources": sorted({c["filename"] for c in chunks}),
-                }
-        except Exception as exc:
-            last_error = exc
+                return _pack(response.text)
+        except Exception:
             continue
 
-    # Fallback to local answer generator if all Gemini cloud models failed
-    return local_answer(question, chunks, history=history)
+    if not chunks:
+        return _pack(MISSING_INFO_ANSWER if not (ml_context and used_ml) else ml_context)
+    local = local_answer(question, chunks, history=history)
+    local["source_details"] = source_details
+    local["question_kind"] = kind
+    return local
+
 
 
 

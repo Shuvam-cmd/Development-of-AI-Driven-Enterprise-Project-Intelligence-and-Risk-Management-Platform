@@ -16,6 +16,12 @@ page_header(
 project = st.session_state.get("selected_project", {})
 project_name = project.get("name", "Your IT Project") if project else "Your IT Project"
 rag_ready = st.session_state.get("rag_ready", False)
+
+from utils.app_store import documents_as_text_map, create_conversation, list_conversations, list_messages, add_message, delete_conversation
+
+if "documents" not in st.session_state or not st.session_state.documents:
+    st.session_state.documents = documents_as_text_map(st.session_state.user_id)
+
 documents = st.session_state.get("documents", {})
 api_base = st.session_state.get("api_base", "http://127.0.0.1:8000")
 
@@ -78,8 +84,19 @@ st.divider()
 # CHAT SESSION & STARTERS
 # ============================================================
 
-if "it_chat_history" not in st.session_state:
-    st.session_state.it_chat_history = []
+user_id = st.session_state.user_id
+
+if "it_conversation_id" not in st.session_state:
+    convs = list_conversations(user_id)
+    if convs:
+        st.session_state.it_conversation_id = convs[0]["id"]
+    else:
+        new_conv = create_conversation(user_id, "IT Project Chat")
+        st.session_state.it_conversation_id = new_conv["id"]
+
+# Always load from DB to ensure sync
+db_messages = list_messages(user_id, st.session_state.it_conversation_id)
+st.session_state.it_chat_history = db_messages
 
 c_head1, c_head2 = st.columns([3, 1])
 with c_head1:
@@ -87,6 +104,9 @@ with c_head1:
 with c_head2:
     if st.session_state.it_chat_history:
         if st.button("Clear Chat", use_container_width=True):
+            delete_conversation(user_id, st.session_state.it_conversation_id)
+            new_conv = create_conversation(user_id, "IT Project Chat")
+            st.session_state.it_conversation_id = new_conv["id"]
             st.session_state.it_chat_history = []
             st.rerun()
 
@@ -103,7 +123,8 @@ if not st.session_state.it_chat_history:
     for col, starter in zip(cols, starters):
         with col:
             if st.button(starter, use_container_width=True, key=f"it_start_{starter[:15]}"):
-                st.session_state.it_chat_history.append({"role": "user", "content": starter})
+                add_message(user_id, st.session_state.it_conversation_id, "user", starter)
+                st.session_state.it_chat_history = list_messages(user_id, st.session_state.it_conversation_id)
                 st.rerun()
 
 # ============================================================
@@ -149,7 +170,8 @@ if st.session_state.it_chat_history and st.session_state.it_chat_history[-1]["ro
 active_question = question or pending
 
 if question:
-    st.session_state.it_chat_history.append({"role": "user", "content": question})
+    add_message(user_id, st.session_state.it_conversation_id, "user", question)
+    st.session_state.it_chat_history = list_messages(user_id, st.session_state.it_conversation_id)
     st.rerun()
 
 if active_question and st.session_state.it_chat_history[-1]["role"] == "user":
@@ -198,10 +220,6 @@ if active_question and st.session_state.it_chat_history[-1]["role"] == "user":
                     for snip in snippets:
                         st.caption(f"> *\"{snip[:220]}...\"*")
 
-    st.session_state.it_chat_history.append({
-        "role": "assistant",
-        "content": answer,
-        "sources": sources,
-        "snippets": snippets,
-    })
+    add_message(user_id, st.session_state.it_conversation_id, "assistant", answer, sources)
+    st.session_state.it_chat_history = list_messages(user_id, st.session_state.it_conversation_id)
     st.rerun()

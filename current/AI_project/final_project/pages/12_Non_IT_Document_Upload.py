@@ -5,6 +5,7 @@ from utils.predictor import predict_non_it_risk, predict_it_risk
 from utils.llm_parser import parse_document_with_gemini, parse_batch_with_gemini
 from rag_chatbot.session_store import clear_index
 from utils.ui import render_model_quality, render_risk_management_processes
+from utils.app_store import save_document
 
 inject_css()
 
@@ -96,6 +97,41 @@ if uploaded_file is not None:
                 st.error("No readable text was found. Upload a text-based PDF, DOCX, CSV, or TXT file.")
                 st.stop()
             st.session_state.documents[uploaded_file.name] = extracted_text
+
+            # --- Compute per-file-type stats for Project Analysis ---
+            file_bytes = uploaded_file.getvalue()
+            fname_lower = uploaded_file.name.lower()
+            doc_meta: dict = {"size_bytes": len(file_bytes)}
+            if fname_lower.endswith(".pdf"):
+                doc_meta["doc_type"] = "PDF"
+                try:
+                    from pypdf import PdfReader
+                    import io as _io
+                    _rdr = PdfReader(_io.BytesIO(file_bytes))
+                    doc_meta["page_count"] = len(_rdr.pages)
+                except Exception:
+                    doc_meta["page_count"] = None
+            elif fname_lower.endswith(".docx"):
+                doc_meta["doc_type"] = "DOCX"
+                words = len(extracted_text.split())
+                doc_meta["page_count"] = max(1, round(words / 250))
+            elif fname_lower.endswith(".csv"):
+                doc_meta["doc_type"] = "CSV"
+                doc_meta["row_count"] = max(0, extracted_text.count("\n") - 1)
+            elif fname_lower.endswith(".txt"):
+                doc_meta["doc_type"] = "TXT"
+                doc_meta["char_count"] = len(extracted_text)
+            else:
+                doc_meta["doc_type"] = "Document"
+
+            # Persist to database
+            save_document(
+                user_id=st.session_state.get("user_id", ""),
+                filename=uploaded_file.name,
+                content=file_bytes,
+                extracted_text=extracted_text,
+                metadata=doc_meta,
+            )
 
             try:
                 if is_csv:

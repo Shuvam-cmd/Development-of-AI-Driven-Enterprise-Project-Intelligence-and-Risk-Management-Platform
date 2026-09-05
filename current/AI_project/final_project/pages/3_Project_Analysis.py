@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 from utils.ui import inject_css, page_header, risk_badge
-from utils.dataset_analyzer import (
-    load_dataset, get_dataset_metadata,
-    render_it_vs_non_it_chart, render_risk_distribution_chart,
-    render_budget_vs_risk_chart, render_key_feature_stats_chart
-)
 from utils.api_client import backend_health
+from utils.app_store import list_documents
+from utils.rbac import current_user_id
 
 # ============================================================
 # PAGE SETUP
@@ -16,8 +14,8 @@ from utils.api_client import backend_health
 inject_css()
 
 page_header(
-    "IT Project & Dataset Intelligence Analysis",
-    "Comprehensive dataset analytics across 200,000 project records, API status, and active project ML predictions."
+    "IT Project & Document Intelligence Analysis",
+    "Live document analytics for your uploaded project files, API status, and active project ML predictions."
 )
 
 project_id = st.session_state.get("selected_project_id")
@@ -25,45 +23,110 @@ project = st.session_state.get("selected_project", {})
 api_base = st.session_state.get("api_base", "http://127.0.0.1:8000")
 
 # ============================================================
-# 1. SYSTEM & DATASET TELEMETRY KPIS
+# HELPER: format document size/count card value
 # ============================================================
 
-meta = get_dataset_metadata()
+def _format_size(size_bytes):
+    if size_bytes is None:
+        return "—"
+    if size_bytes >= 1_048_576:
+        return f"{size_bytes / 1_048_576:.1f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes:,} B"
+
+
+def _doc_content_label(meta):
+    """Return a human-readable page/row/slide/image count string."""
+    doc_type = (meta.get("doc_type") or "").upper()
+    if doc_type == "PDF":
+        pc = meta.get("page_count")
+        return f"{pc} pages" if pc else "—"
+    if doc_type == "PPTX":
+        sc = meta.get("slide_count")
+        return f"{sc} slides" if sc else "—"
+    if doc_type == "DOCX":
+        pc = meta.get("page_count")
+        return f"~{pc} pages" if pc else "—"
+    if doc_type == "CSV":
+        rc = meta.get("row_count")
+        return f"{rc:,} rows" if rc is not None else "—"
+    if doc_type == "TXT":
+        cc = meta.get("char_count")
+        return f"{cc:,} chars" if cc else "—"
+    if doc_type == "IMAGE":
+        return "1 image"
+    return "—"
+
+# ============================================================
+# 1. UPLOADED DOCUMENT TELEMETRY KPIs
+# ============================================================
+
+user_id = current_user_id()
+docs = list_documents(user_id) if user_id else []
 is_healthy = backend_health(api_base)
 
-st.subheader("Dataset & API System Telemetry")
+st.subheader("Uploaded Document & API System Telemetry")
+
+# Document selector (syncs selected_project for cross-page consistency)
+selected_doc = None
+if len(docs) > 1:
+    doc_names = [d["filename"] for d in docs]
+    sel_idx = st.selectbox(
+        "Select uploaded document to inspect",
+        range(len(doc_names)),
+        format_func=lambda i: doc_names[i],
+        key="pa_doc_selector",
+    )
+    selected_doc = docs[sel_idx]
+elif len(docs) == 1:
+    selected_doc = docs[0]
+
+if not selected_doc and not docs:
+    st.info("Upload a project document on the **Document Upload** page to see live document analytics here.")
+
+# Build card values
+doc_meta = (selected_doc or {}).get("metadata", {}) if selected_doc else {}
+doc_filename = (selected_doc or {}).get("filename", "—")
+doc_size = _format_size((selected_doc or {}).get("size_bytes"))
+doc_content = _doc_content_label(doc_meta)
+doc_type = doc_meta.get("doc_type", "—")
+doc_uploaded = (selected_doc or {}).get("created_at", "—")
 
 k1, k2, k3, k4, k5 = st.columns(5)
 
 with k1:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-card-title">Dataset Size</div>        <div class="metric-card-value">{meta['file_size_mb']:.1f}<span style="font-size:1.1rem; color:#94a3b8;"> MB</span></div>
-        <div class="metric-card-sub" style="color:#cbd5e1;">project_risk_dataset.csv</div>
+        <div class="metric-card-title">Document</div>        <div class="metric-card-value" style="font-size:1.15rem;">{doc_filename}</div>
+        <div class="metric-card-sub" style="color:#cbd5e1;">{doc_type}</div>
     </div>
     """, unsafe_allow_html=True)
 
 with k2:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-card-title">Total Records</div>        <div class="metric-card-value">{meta['total_records']:,}</div>
-        <div class="metric-card-sub" style="color:#cbd5e1;">Telemetry Rows</div>
+        <div class="metric-card-title">File Size</div>        <div class="metric-card-value">{doc_size}</div>
+        <div class="metric-card-sub" style="color:#cbd5e1;">Uploaded File</div>
     </div>
     """, unsafe_allow_html=True)
 
 with k3:
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-card-title">Feature Count</div>        <div class="metric-card-value">{meta['total_features']}</div>
-        <div class="metric-card-sub" style="color:#cbd5e1;">Predictive Attributes</div>
+        <div class="metric-card-title">Content</div>        <div class="metric-card-value">{doc_content}</div>
+        <div class="metric-card-sub" style="color:#cbd5e1;">Pages / Rows / Slides</div>
     </div>
     """, unsafe_allow_html=True)
 
 with k4:
+    risk_level = project.get("risk_level", "—") if project else "—"
+    risk_score = project.get("risk_score", "—") if project else "—"
+    risk_display = f"{risk_score}" if isinstance(risk_score, (int, float)) else risk_score
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-card-title">Relevant IT Records</div>        <div class="metric-card-value" style="color:#38bdf8;">{meta['it_count']:,}</div>
-        <div class="metric-card-sub" style="color:#cbd5e1;">{(meta['it_count']/max(1, meta['total_records'])*100):.1f}% of Dataset</div>
+        <div class="metric-card-title">Risk Assessment</div>        <div class="metric-card-value" style="color:#f97316;">{risk_display}</div>
+        <div class="metric-card-sub">{risk_badge(risk_level) if risk_level != '—' else '—'}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -80,30 +143,136 @@ with k5:
 st.write("")
 
 # ============================================================
-# 2. CHARTS FOR DATASET ANALYSIS
+# 2. DOCUMENT-SPECIFIC ANALYSIS & FEATURE VISUALIZATIONS
 # ============================================================
 
-st.subheader("Dataset Analysis & Distribution Visualizations")
+st.subheader("Document Analysis & Feature Visualizations")
 
-tab1, tab2 = st.tabs(["Domain & Risk Distributions","Correlation & Feature Analytics"])
+tab1, tab2 = st.tabs(["Risk & Feature Analytics", "Document Detail & Risk Triggers"])
 
 with tab1:
     c1, c2 = st.columns(2)
     with c1:
-        fig_domain = render_it_vs_non_it_chart()
-        if fig_domain: st.plotly_chart(fig_domain, use_container_width=True)
+        # Risk score gauge from uploaded document
+        if project:
+            rs = float(project.get("risk_score", 0))
+            rl = project.get("risk_level", "Medium")
+            gauge_color = "#10b981" if rs < 35 else "#fbbf24" if rs < 65 else "#ef4444"
+            fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=rs,
+                title={"text": f"Document Risk Score ({rl})", "font": {"color": "#f8fafc", "size": 15}},
+                number={"font": {"color": gauge_color, "size": 42}},
+                gauge={
+                    "axis": {"range": [0, 100], "tickfont": {"color": "#94a3b8"}},
+                    "bar": {"color": gauge_color},
+                    "bgcolor": "rgba(15,23,42,0.5)",
+                    "steps": [
+                        {"range": [0, 35], "color": "rgba(16,185,129,0.15)"},
+                        {"range": [35, 65], "color": "rgba(251,191,36,0.15)"},
+                        {"range": [65, 100], "color": "rgba(239,68,68,0.15)"},
+                    ],
+                }
+            ))
+            fig_gauge.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                font={"color": "#f8fafc", "family": "Plus Jakarta Sans"},
+                margin=dict(l=20, r=20, t=50, b=20),
+                height=260,
+            )
+            st.plotly_chart(fig_gauge, use_container_width=True)
+        else:
+            st.info("Upload a document to see the risk gauge.")
+
     with c2:
-        fig_risk = render_risk_distribution_chart()
-        if fig_risk: st.plotly_chart(fig_risk, use_container_width=True)
+        # Feature bar chart — only show features that exist and are non-zero
+        if project:
+            features = project.get("features", {})
+            feature_labels = {
+                "budget_usd": "Budget (USD)",
+                "schedule_overrun_pct": "Schedule Overrun %",
+                "cost_overrun_pct": "Cost Overrun %",
+                "tech_complexity_score": "Tech Complexity",
+                "external_dependency_score": "Ext. Dependency",
+                "resource_availability_pct": "Resource Avail. %",
+                "vendor_dependency_count": "Vendor Count",
+                "team_turnover_pct": "Turnover %",
+            }
+            # Filter to present, non-zero values (skip budget since it's a different scale)
+            chart_features = {
+                feature_labels.get(k, k): float(v)
+                for k, v in features.items()
+                if k in feature_labels and k != "budget_usd" and v and float(v) != 0
+            }
+
+            if len(chart_features) >= 2:
+                fig_feat = go.Figure(go.Bar(
+                    x=list(chart_features.values()),
+                    y=list(chart_features.keys()),
+                    orientation="h",
+                    marker_color="#38bdf8",
+                    text=[f"{v:.1f}" for v in chart_features.values()],
+                    textposition="auto",
+                ))
+                fig_feat.update_layout(
+                    title={"text": "<b>Extracted Project Features</b>", "font": {"size": 14, "color": "#ffffff"}},
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(15,23,42,0.4)",
+                    font={"color": "#f8fafc", "family": "Plus Jakarta Sans"},
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    margin=dict(l=20, r=20, t=50, b=20),
+                    height=260,
+                )
+                st.plotly_chart(fig_feat, use_container_width=True)
+            elif chart_features:
+                st.markdown("**Extracted Features:**")
+                for k, v in chart_features.items():
+                    st.write(f"- **{k}:** {v:.1f}")
+            else:
+                st.info("Structured features could not be extracted from this document type.")
+        else:
+            st.info("Upload a document to see extracted features.")
 
 with tab2:
     c3, c4 = st.columns(2)
     with c3:
-        fig_budget = render_budget_vs_risk_chart()
-        if fig_budget: st.plotly_chart(fig_budget, use_container_width=True)
+        # Document detail table
+        detail_rows = {
+            "File Name": doc_filename,
+            "File Size": doc_size,
+            "Document Type": doc_type,
+            "Content": doc_content,
+            "Upload Time": doc_uploaded,
+            "Risk Level": project.get("risk_level", "—") if project else "—",
+            "Risk Score": f"{project.get('risk_score', '—')}/100" if project else "—",
+            "Health Score": f"{project.get('health_score', '—')}%" if project else "—",
+        }
+        st.markdown("**Document Summary**")
+        st.dataframe(
+            pd.DataFrame(detail_rows.items(), columns=["Property", "Value"]),
+            use_container_width=True, hide_index=True,
+        )
+
     with c4:
-        fig_stats = render_key_feature_stats_chart()
-        if fig_stats: st.plotly_chart(fig_stats, use_container_width=True)
+        # Potential risks from the uploaded document
+        if project:
+            potential_risks = project.get("potential_risks", [])
+            if potential_risks:
+                st.markdown("**Document Risk Triggers**")
+                for idx, risk_item in enumerate(potential_risks[:6], 1):
+                    severity_color = "#ef4444" if idx <= 2 else ("#f97316" if idx <= 4 else "#fbbf24")
+                    severity_label = "HIGH" if idx <= 2 else ("MEDIUM" if idx <= 4 else "WATCH")
+                    st.markdown(f"""
+                    <div style="background: rgba(15, 23, 42, 0.7); padding: 0.7rem 1rem; border-radius: 8px; border-left: 4px solid {severity_color}; margin-bottom: 0.5rem;">
+                        <span style="color: {severity_color}; font-weight: 800; font-size: 0.75rem; text-transform: uppercase; margin-right: 0.6rem;">[{severity_label}]</span>
+                        <span style="color: #f8fafc; font-size: 0.88rem;">{risk_item}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.success("No risk triggers detected in the uploaded document.")
+        else:
+            st.info("Upload a document to see risk triggers.")
 
 st.divider()
 
@@ -157,7 +326,7 @@ else:
             <p style="color:#ffffff; font-size:0.95rem;"><strong>Project Name:</strong> {project.get('name', 'IT Project')}</p>
             <p style="color:#ffffff; font-size:0.95rem;"><strong>Predicted Risk Score:</strong> {risk:.1f}/100 ({risk_badge(r_level)})</p>
             <p style="color:#ffffff; font-size:0.95rem;"><strong>Engineering Health Score:</strong> {health:.1f}%</p>
-            <p style="color:#cbd5e1; font-size:0.9rem;"><strong>Dataset Benchmark Mean:</strong> {meta['mean_risk_score']:.1f}/100</p>
+            <p style="color:#cbd5e1; font-size:0.9rem;"><strong>Source Document:</strong> {doc_filename}</p>
         </div>
         """, unsafe_allow_html=True)
 

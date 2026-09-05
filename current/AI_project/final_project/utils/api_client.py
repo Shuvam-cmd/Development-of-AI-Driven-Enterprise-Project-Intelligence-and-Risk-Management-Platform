@@ -16,9 +16,13 @@ def api_get(path, base_url="http://127.0.0.1:8000", timeout=20):
         return {"_error": f"Invalid JSON response: {e}"}
 
 
-def api_post(path, base_url="http://127.0.0.1:8000", payload=None, timeout=45):
+def api_post(path, base_url="http://127.0.0.1:8000", payload=None, timeout=45, token=None):
     try:
-        r = requests.post(_url(base_url, path), json=payload, timeout=timeout)
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            headers["X-Auth-Token"] = token
+        r = requests.post(_url(base_url, path), json=payload, timeout=timeout, headers=headers or None)
         r.raise_for_status()
         return r.json()
     except requests.RequestException as e:
@@ -45,9 +49,20 @@ def backend_health(base_url="http://127.0.0.1:8000"):
 # API CLIENT METHODS FOR FRONTEND-BACKEND COMMUNICATION
 # ============================================================
 
+def _auth_token():
+    try:
+        import streamlit as st
+        return st.session_state.get("auth_token")
+    except Exception:
+        return None
+
+
 def api_predict_it_risk(features: dict, base_url="http://127.0.0.1:8000"):
     """Call backend API for IT Risk Prediction."""
-    res = api_post("/api/v1/predict/it", base_url=base_url, payload={"features": features})
+    token = _auth_token()
+    res = api_post("/api/v1/predict/it", base_url=base_url, payload={"features": features}, token=token)
+    if "_error" in res:
+        res = api_post("/api/predict/it", base_url=base_url, payload={"features": features}, token=token)
     if "_error" in res:
         return None
     return res
@@ -55,7 +70,11 @@ def api_predict_it_risk(features: dict, base_url="http://127.0.0.1:8000"):
 
 def api_predict_non_it_risk(features: dict, base_url="http://127.0.0.1:8000"):
     """Call backend API for Non-IT Risk Prediction."""
-    res = api_post("/api/v1/predict/non-it", base_url=base_url, payload={"features": features})
+    token = _auth_token()
+    payload = {"features": features}
+    res = api_post("/api/v1/predict/non-it", base_url=base_url, payload=payload, token=token)
+    if "_error" in res:
+        res = api_post("/api/predict/non-it", base_url=base_url, payload=payload, token=token)
     if "_error" in res:
         return None
     return res
@@ -68,7 +87,9 @@ def api_parse_document(document_text: str, is_csv: bool = False, project_kind: s
         "is_csv": is_csv,
         "project_kind": project_kind
     }
-    res = api_post("/api/v1/parse/document", base_url=base_url, payload=payload, timeout=60)
+    res = api_post("/api/v1/parse/document", base_url=base_url, payload=payload, timeout=60, token=_auth_token())
+    if "_error" in res:
+        res = api_post("/api/parse/document", base_url=base_url, payload=payload, timeout=60, token=_auth_token())
     if "_error" in res:
         return None
     return res
@@ -82,20 +103,26 @@ def api_simulate_scenario(baseline_score: float, delay_days: int = 0, budget_cha
         "budget_change_percent": float(budget_change_pct),
         "team_reduction_percent": float(team_reduction_pct)
     }
-    res = api_post("/api/v1/scenario/simulate", base_url=base_url, payload=payload)
+    res = api_post("/api/v1/scenario/simulate", base_url=base_url, payload=payload, token=_auth_token())
+    if "_error" in res:
+        res = api_post("/api/scenario/simulate", base_url=base_url, payload=payload, token=_auth_token())
     if "_error" in res:
         return None
     return res
 
 
-def api_query_rag(question: str, chunks: list, chat_history: list = None, base_url="http://127.0.0.1:8000"):
+def api_query_rag(question: str, chunks: list, chat_history: list = None, base_url="http://127.0.0.1:8000", project=None, prediction=None):
     """Call backend API for RAG chatbot answer generation."""
     payload = {
         "question": question,
         "chunks": chunks,
-        "chat_history": chat_history
+        "chat_history": chat_history,
+        "project": project,
+        "prediction": prediction,
     }
-    res = api_post("/api/v1/rag/query", base_url=base_url, payload=payload, timeout=40)
+    res = api_post("/api/v1/rag/query", base_url=base_url, payload=payload, timeout=40, token=_auth_token())
+    if "_error" in res:
+        res = api_post("/api/rag/query", base_url=base_url, payload=payload, timeout=40, token=_auth_token())
     if "_error" in res:
         return None
     return res
@@ -108,7 +135,9 @@ def api_generate_document(project_data: dict, document_type: str, audience: str 
         "document_type": document_type,
         "audience": audience
     }
-    res = api_post("/api/v1/generate/document", base_url=base_url, payload=payload, timeout=40)
+    res = api_post("/api/v1/generate/document", base_url=base_url, payload=payload, timeout=40, token=_auth_token())
+    if "_error" in res:
+        res = api_post("/api/generate/document", base_url=base_url, payload=payload, timeout=40, token=_auth_token())
     if "_error" in res:
         return None
     return res.get("content")

@@ -122,9 +122,11 @@ def build_index(documents: dict[str, str], progress_callback=None) -> int:
         # respect MAX_CHUNKS_PER_FILE
         pieces = pieces[: config.MAX_CHUNKS_PER_FILE]
         for i, piece in enumerate(pieces):
+            section = "table" if piece.strip().startswith("|") or "### Sheet:" in piece else f"section {i + 1}"
             all_chunks.append({
                 "filename": filename,
                 "chunk_index": i,
+                "section": section,
                 "text": piece,
                 "vector": None,  # filled below
             })
@@ -167,7 +169,7 @@ def build_index(documents: dict[str, str], progress_callback=None) -> int:
     return len(all_chunks)
 
 
-def retrieve(question: str, top_k: int = config.TOP_K, history: list[dict] = None) -> list[dict]:
+def retrieve(question: str, top_k: int = config.TOP_K, history: list[dict] = None, role: str = None) -> list[dict]:
     """
     Retrieve the top_k most relevant chunks for the given question and conversation context.
 
@@ -220,13 +222,17 @@ def retrieve(question: str, top_k: int = config.TOP_K, history: list[dict] = Non
                 "text": chunk["text"],
                 "filename": chunk["filename"],
                 "chunk_index": chunk["chunk_index"],
+                "section": chunk.get("section", f"section {chunk['chunk_index'] + 1}"),
                 "score": score,
                 "orig_idx": idx
             })
             
         # Sort by score descending; fallback to original order for ties
         scored.sort(key=lambda item: (item["score"], -item["orig_idx"]), reverse=True)
-        return [{"text": s["text"], "filename": s["filename"], "chunk_index": s["chunk_index"], "score": s["score"]} for s in scored[:top_k]]
+        # Scope Gate: only return chunks with at least some term matches
+        scored = [x for x in scored if x["score"] > 0]
+        picked = _diversify_and_filter(scored, top_k, role)
+        return picked
 
     config.validate_config()
     try:
@@ -237,13 +243,17 @@ def retrieve(question: str, top_k: int = config.TOP_K, history: list[dict] = Non
                 "text": c["text"],
                 "filename": c["filename"],
                 "chunk_index": c["chunk_index"],
+                "section": c.get("section", f"section {c['chunk_index'] + 1}"),
                 "score": _cosine(query_vector, c["vector"]),
             }
             for c in chunks
             if c.get("vector")
         ]
+        # Scope Gate: Require a minimum cosine similarity threshold
+        scored = [x for x in scored if x["score"] >= 0.35]
+        
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
+        return _diversify_and_filter(scored, top_k, role)
     except Exception:
         # Fallback to local term match if cloud query embedding fails
         raw_words = re.findall(r"[a-zA-Z]{3,}", search_query.lower())
@@ -251,11 +261,49 @@ def retrieve(question: str, top_k: int = config.TOP_K, history: list[dict] = Non
         for c in chunks:
             text_lower = c["text"].lower()
             score = sum(text_lower.count(w) for w in raw_words)
-            scored.append({"text": c["text"], "filename": c["filename"], "chunk_index": c["chunk_index"], "score": score})
+            scored.append({
+                "text": c["text"],
+                "filename": c["filename"],
+                "chunk_index": c["chunk_index"],
+                "section": c.get("section", f"section {c['chunk_index'] + 1}"),
+                "score": score,
+            })
+        
+        # Scope Gate: must have at least one keyword match
+        scored = [x for x in scored if x["score"] > 0]
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
+        return _diversify_and_filter(scored, top_k, role)
 
 
+def _diversify_and_filter(scored: list[dict], top_k: int, role: str | None) -> list[dict]:
+    from utils.roles import filter_chunks_for_role
+
+    filtered = filter_chunks_for_role(scored, role)
+    picked: list[dict] = []
+    seen_files: set[str] = set()
+    for item in filtered:
+        fn = item.get("filename", "")
+        if fn not in seen_files or len(picked) < max(2, top_k // 2):
+            picked.append(item)
+            seen_files.add(fn)
+        if len(picked) >= top_k:
+            break
+    if len(picked) < top_k:
+        for item in filtered:
+            if item not in picked:
+                picked.append(item)
+            if len(picked) >= top_k:
+                break
+    return [
+        {
+            "text": s["text"],
+            "filename": s["filename"],
+            "chunk_index": s["chunk_index"],
+            "section": s.get("section", f"section {s.get('chunk_index', 0) + 1}"),
+            "score": s.get("score", 0),
+        }
+        for s in picked
+    ]
 
 
 def clear_index() -> None:

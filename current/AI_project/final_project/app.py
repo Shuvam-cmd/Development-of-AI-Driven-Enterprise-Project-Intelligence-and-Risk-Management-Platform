@@ -25,6 +25,15 @@ if "username" not in st.session_state:
 if "user_type" not in st.session_state:
     st.session_state.user_type = ""
 
+if "job_role" not in st.session_state:
+    st.session_state.job_role = ""
+
+if "user_id" not in st.session_state:
+    st.session_state.user_id = ""
+
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = ""
+
 if "documents" not in st.session_state:
     st.session_state.documents = {}
 
@@ -155,6 +164,13 @@ if not st.session_state.logged_in:
             
             username = st.text_input("Username / Enterprise Email", placeholder="name@company.com")
             password = st.text_input("Security Access Token / Password", type="password", placeholder="••••••••")
+            from utils.roles import JOB_ROLES
+            signup_role = st.selectbox(
+                "Job role (used only when creating an account — it is stored and cannot be switched at login)",
+                options=JOB_ROLES,
+                index=JOB_ROLES.index("Full Stack Developer"),
+            )
+            st.caption("Login uses the job role already stored on your account. You cannot pick a different role to gain access.")
             
             st.write("")
             
@@ -172,63 +188,56 @@ if not st.session_state.logged_in:
     # LOGIN / SIGNUP VALIDATION
     # ========================================================
 
-    import json
-    import os
+    from utils.app_store import authenticate, create_user, init_db
+    from utils.roles import default_workspace, role_may_choose_workspace
 
-    USER_FILE = "users.json"
-
-    def load_users():
-        if not os.path.exists(USER_FILE):
-            default_users = {
-                "it_user": {"password": "it123", "role": "IT"}, 
-                "nonit_user": {"password": "nonit123", "role": "Non-IT"}
-            }
-            with open(USER_FILE, "w") as f:
-                json.dump(default_users, f, indent=4)
-            return default_users
-        with open(USER_FILE, "r") as f:
-            return json.load(f)
-
-    def save_users(users):
-        with open(USER_FILE, "w") as f:
-            json.dump(users, f, indent=4)
+    init_db()
 
     if signup_clicked:
         username = username.strip()
         if not username or not password:
             st.error("Please enter a username and password.")
         else:
-            users = load_users()
-            if username in users:
-                st.error("Username already exists. Please log in.")
-            else:
-                users[username] = {"password": password, "role": "IT"}
-                save_users(users)
-                st.success("Account created successfully! You can now log in.")
+            try:
+                create_user(username, password, signup_role)
+                st.success("Account created. Your job role is stored on the account. You can now log in.")
+            except ValueError as e:
+                st.error(str(e))
 
     if login_clicked:
         username = username.strip()
-        users = load_users()
-        
-        if username in users and users[username]["password"] == password:
+        session = authenticate(username, password)
+        if session:
             st.session_state.logged_in = True
-            st.session_state.username = username
-            
-            # Every user chooses the appropriate workspace after sign-in.
-            st.session_state.user_type = ""
+            st.session_state.username = session["username"]
+            st.session_state.user_id = session["id"]
+            st.session_state.auth_token = session["token"]
+            st.session_state.job_role = session["job_role"]
+            from utils.app_store import get_user_workspace, set_user_workspace
+            last_ws = get_user_workspace(session["id"])
+            if last_ws:
+                # Use persisted choice from a previous session
+                st.session_state.user_type = last_ws
+            elif role_may_choose_workspace(session["job_role"]):
+                # BOTH-workspace role with no saved preference → show selection screen
+                st.session_state.user_type = ""
+            else:
+                # Fixed workspace role → auto-assign AND persist so future logins skip the screen
+                fixed_ws = default_workspace(session["job_role"])
+                set_user_workspace(session["id"], fixed_ws)
+                st.session_state.user_type = fixed_ws
 
-            # Reset project data
             st.session_state.documents = {}
             st.session_state.selected_project_id = None
             st.session_state.selected_project = None
             st.session_state.project_analyzed = False
             st.session_state.prediction = None
+            st.session_state.prediction_detail = None
             st.session_state.it_project_uploaded = False
             st.session_state.non_it_project_uploaded = False
-
             st.rerun()
         else:
-            st.error("Invalid username, password, or role.")
+            st.error("Invalid username or password.")
 
 
     # --------------------------------------------------------
@@ -239,65 +248,77 @@ if not st.session_state.logged_in:
 
 
 # ============================================================
-# USER IS LOGGED IN
+# GATE 2: WORKSPACE SELECTION
+# Only shown when logged_in == True AND user_type is not yet set.
+# This is the ONLY way to reach the dashboard for a new user.
 # ============================================================
 
-if not st.session_state.user_type:
+if not st.session_state.get("user_type"):
+    # Hard gate: hide sidebar so user cannot navigate away
     st.markdown("""
         <style>
         section[data-testid="stSidebar"], [data-testid="stSidebarNav"] { display: none !important; }
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
         .block-container { max-width: 1000px; padding-top: 3rem; }
         </style>
     """, unsafe_allow_html=True)
-    
-    st.markdown("""
+
+    st.markdown(f"""
     <div style="text-align: center; margin-bottom: 2.5rem;">
         <h1 style="color: #ffffff; font-size: 2.2rem; font-weight: 800; margin-bottom: 0.6rem;">Select Project Workspace</h1>
-        <p style="color: #cbd5e1; font-size: 1.05rem;">Choose the domain engine tailored to your project architecture, risk drivers, and terminology.</p>
+        <p style="color: #cbd5e1; font-size: 1.05rem;">Logged in as <strong>{st.session_state.username}</strong> &mdash; role: <strong>{st.session_state.job_role}</strong>.<br/>Choose the domain engine for your session. This does not change your job role or permissions.</p>
     </div>
     """, unsafe_allow_html=True)
-    
+
     it_col, business_col = st.columns(2)
     with it_col:
         st.markdown("""
         <div style="background: linear-gradient(135deg, rgba(14, 165, 233, 0.15) 0%, rgba(15, 23, 42, 0.8) 100%); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 18px; padding: 1.5rem; min-height: 295px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 10px 25px rgba(0,0,0,0.4); margin-bottom: 1rem;">
             <div>
-                <div style="font-size: 2rem; margin-bottom: 0.5rem;"></div>                <h2 style="color: #38bdf8; font-size: 1.3rem; font-weight: 800; margin-top: 0; margin-bottom: 0.4rem;">IT & Technical Engineering</h2>
+                <div style="font-size: 2rem; margin-bottom: 0.5rem;"></div>
+                <h2 style="color: #38bdf8; font-size: 1.3rem; font-weight: 800; margin-top: 0; margin-bottom: 0.4rem;">IT &amp; Technical Engineering</h2>
                 <p style="color: #cbd5e1; font-size: 0.88rem; line-height: 1.45; min-height: 68px; margin-bottom: 0.8rem;">
-                    XGBoost & CatBoost ML models trained on software delivery, cloud migrations, DevOps pipelines, tech stack complexity, and IT vendor dependencies.
+                    XGBoost &amp; CatBoost ML models trained on software delivery, cloud migrations, DevOps pipelines, tech stack complexity, and IT vendor dependencies.
                 </p>
             </div>
             <div style="display: flex; flex-wrap: wrap; gap: 0.35rem; min-height: 55px; align-content: flex-start; box-sizing: border-box;">
                 <span style="background: rgba(56, 189, 248, 0.2); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Software Engineering</span>
-                <span style="background: rgba(56, 189, 248, 0.2); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Cloud & Infrastructure</span>
+                <span style="background: rgba(56, 189, 248, 0.2); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Cloud &amp; Infrastructure</span>
                 <span style="background: rgba(56, 189, 248, 0.2); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Cybersecurity</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Enter IT Workspace", type="primary", use_container_width=True):
+        if st.button("Enter IT Workspace", type="primary", use_container_width=True, key="ws_enter_it"):
+            from utils.app_store import set_user_workspace
+            set_user_workspace(st.session_state.user_id, "IT")
             st.session_state.user_type = "IT"
             st.rerun()
-        
+
     with business_col:
         st.markdown("""
         <div style="background: linear-gradient(135deg, rgba(245, 158, 11, 0.15) 0%, rgba(15, 23, 42, 0.8) 100%); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 18px; padding: 1.5rem; min-height: 295px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; box-shadow: 0 10px 25px rgba(0,0,0,0.4); margin-bottom: 1rem;">
             <div>
-                <div style="font-size: 2rem; margin-bottom: 0.5rem;"></div>                <h2 style="color: #fbbf24; font-size: 1.3rem; font-weight: 800; margin-top: 0; margin-bottom: 0.4rem;">Non-IT & Business Operations</h2>
+                <div style="font-size: 2rem; margin-bottom: 0.5rem;"></div>
+                <h2 style="color: #fbbf24; font-size: 1.3rem; font-weight: 800; margin-top: 0; margin-bottom: 0.4rem;">Non-IT &amp; Business Operations</h2>
                 <p style="color: #cbd5e1; font-size: 0.88rem; line-height: 1.45; min-height: 68px; margin-bottom: 0.8rem;">
-                    Random Forest & Gradient Boosting models tuned for operational risk, business transformation, construction, supply chain, and financial rollout.
+                    Random Forest &amp; Gradient Boosting models tuned for operational risk, business transformation, construction, supply chain, and financial rollout.
                 </p>
             </div>
             <div style="display: flex; flex-wrap: wrap; gap: 0.35rem; min-height: 55px; align-content: flex-start; box-sizing: border-box;">
                 <span style="background: rgba(245, 158, 11, 0.2); color: #fde68a; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Business Operations</span>
-                <span style="background: rgba(245, 158, 11, 0.2); color: #fde68a; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Supply Chain & Logistics</span>
+                <span style="background: rgba(245, 158, 11, 0.2); color: #fde68a; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Supply Chain &amp; Logistics</span>
                 <span style="background: rgba(245, 158, 11, 0.2); color: #fde68a; border: 1px solid rgba(245, 158, 11, 0.3); font-size: 0.74rem; padding: 0.2rem 0.45rem; border-radius: 6px;">Strategic Finance</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Enter Non-IT Workspace", use_container_width=True):
+        if st.button("Enter Non-IT Workspace", use_container_width=True, key="ws_enter_nonit"):
+            from utils.app_store import set_user_workspace
+            set_user_workspace(st.session_state.user_id, "NON_IT")
             st.session_state.user_type = "NON_IT"
             st.rerun()
-        
+
+    # Hard stop — dashboard never renders without a workspace set
     st.stop()
 
 from utils.api_client import backend_health
@@ -380,6 +401,18 @@ with st.sidebar:
                     st.session_state.selected_project = p
                     st.session_state.selected_project_id = p["id"]
                     st.rerun()
+
+    if st.session_state.get("logged_in"):
+        from utils.roles import role_may_choose_workspace
+        if role_may_choose_workspace(st.session_state.job_role):
+            st.divider()
+            current_ws = st.session_state.get("user_type", "")
+            ws_label = "IT & Technical Engineering" if current_ws == "IT" else "Non-IT & Business Operations"
+            st.markdown(f"**Workspace:** {ws_label}")
+            if st.button("🔄 Switch Workspace", use_container_width=True, help="Return to workspace selection screen."):
+                # Clear user_type to route back to the workspace selection gate
+                st.session_state.user_type = ""
+                st.rerun()
 
     st.divider()
 

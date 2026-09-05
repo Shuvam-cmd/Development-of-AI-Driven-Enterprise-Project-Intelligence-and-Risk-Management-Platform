@@ -5,6 +5,8 @@ from utils.predictor import predict_it_risk
 from utils.llm_parser import parse_document_with_gemini, parse_batch_with_gemini
 from rag_chatbot.session_store import clear_index
 from utils.ui import render_model_quality, render_risk_management_processes
+from utils.app_store import save_document
+from utils.vision_parser import process_document_images
 
 # ============================================================
 # PAGE SETUP
@@ -65,6 +67,42 @@ def extract_text(file):
         except Exception as e:
             st.error(f"Failed to read PDF: {e}")
             return ""
+    if filename.endswith(".pptx"):
+        try:
+            import io
+            from pptx import Presentation
+            from pptx.enum.shapes import MSO_SHAPE_TYPE
+            from PIL import Image
+            from utils.vision_parser import llm_read_image
+            prs = Presentation(io.BytesIO(file.getvalue()))
+            text_blocks = []
+            for i, slide in enumerate(prs.slides):
+                text_blocks.append(f"## Slide {i+1}")
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        text_blocks.append(shape.text)
+                    elif shape.has_chart or shape.shape_type == MSO_SHAPE_TYPE.CHART:
+                        try:
+                            chart_data = []
+                            for series in shape.chart.series:
+                                series_name = series.name
+                                values = series.values
+                                categories = [c.label for c in shape.chart.plots[0].categories] if shape.chart.plots else []
+                                chart_data.append(f"Series: {series_name}, Categories: {categories}, Values: {values}")
+                            text_blocks.append(f"[Chart Data: {chart_data}]")
+                        except Exception: pass
+                    elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        try:
+                            image_bytes = shape.image.blob
+                            img = Image.open(io.BytesIO(image_bytes))
+                            if img.mode != "RGB": img = img.convert("RGB")
+                            vision_text = llm_read_image(img)
+                            if vision_text: text_blocks.append(f"[Image Data: {vision_text}]")
+                        except Exception: pass
+            return "\n".join(text_blocks)
+        except Exception as e:
+            st.error(f"Failed to read PPTX: {e}")
+            return ""
 
 def save_prediction(insights_dict, prediction):
     project_id = 1000 + len(st.session_state.documents)
@@ -106,37 +144,109 @@ st.write("### Autonomous Document Processing")
 st.write("Upload a PDF, DOCX, CSV, or TXT. Analysis runs locally first, so it remains available without an internet connection.")
 render_risk_management_processes()
 
-uploaded_file = st.file_uploader(
-    "Choose your IT project document",
-    type=["pdf", "docx", "txt", "csv"],
-    help="Supported formats: PDF, DOCX, TXT and CSV"
+uploaded_files = st.file_uploader(
+    "Choose your IT project document(s)",
+    type=["pdf", "docx", "txt", "csv", "png", "jpg", "jpeg", "pptx"],
+    accept_multiple_files=True,
+    help="Supported formats: PDF, DOCX, TXT, CSV, PPTX, and Images (PNG, JPG, JPEG)"
 )
 
-if uploaded_file is not None:
-    if st.button("Process Document", type="primary", use_container_width=True):
-        st.success(f"Uploaded: {uploaded_file.name}")
+if uploaded_files:
+    if st.button("Process Document(s)", type="primary", use_container_width=True):
+        st.success(f"Uploaded {len(uploaded_files)} file(s).")
         st.divider()
 
-        is_csv = uploaded_file.name.lower().endswith(".csv")
+        is_csv_batch = any(f.name.lower().endswith(".csv") for f in uploaded_files)
+        combined_text = ""
 
-        with st.spinner("Reading document and extracting project signals..."):
-            extracted_text = extract_text(uploaded_file)
-            if not extracted_text.strip():
-                st.error("No readable text was found. Upload a text-based PDF, DOCX, CSV, or TXT file.")
+        with st.spinner("Reading documents, extracting text and images..."):
+            for uploaded_file in uploaded_files:
+                file_bytes = uploaded_file.getvalue()
+                
+                if uploaded_file.name.lower().endswith((".png", ".jpg", ".jpeg")):
+                    import io
+                    from PIL import Image
+                    from utils.vision_parser import llm_read_image
+                    img = Image.open(io.BytesIO(file_bytes))
+                    if img.mode != "RGB": img = img.convert("RGB")
+                    vision_text = llm_read_image(img)
+                    extracted_text = f"--- Image Data: {uploaded_file.name} ---\n{vision_text}" if vision_text else ""
+                else:
+                    extracted_text = extract_text(uploaded_file)
+                    
+                    # Extract image data using Vision LLM for PDFs
+                    if uploaded_file.name.lower().endswith(".pdf"):
+                        vision_text = process_document_images(uploaded_file.name, file_bytes)
+                        if vision_text:
+                            extracted_text += "\n" + vision_text
+
+                if not extracted_text.strip():
+                    continue
+
+                st.session_state.documents[uploaded_file.name] = extracted_text
+                combined_text += f"\n\n--- Document: {uploaded_file.name} ---\n{extracted_text}"
+
+                # --- Compute per-file-type stats for Project Analysis ---
+                fname_lower = uploaded_file.name.lower()
+                doc_meta: dict = {"size_bytes": len(file_bytes)}
+                if fname_lower.endswith(".pdf"):
+                    doc_meta["doc_type"] = "PDF"
+                    try:
+                        from pypdf import PdfReader
+                        import io as _io
+                        _rdr = PdfReader(_io.BytesIO(file_bytes))
+                        doc_meta["page_count"] = len(_rdr.pages)
+                    except Exception:
+                        doc_meta["page_count"] = None
+                elif fname_lower.endswith(".pptx"):
+                    doc_meta["doc_type"] = "PPTX"
+                    try:
+                        import io as _io
+                        from pptx import Presentation as _Prs
+                        _prs = _Prs(_io.BytesIO(file_bytes))
+                        doc_meta["slide_count"] = len(_prs.slides)
+                    except Exception:
+                        doc_meta["slide_count"] = None
+                elif fname_lower.endswith(".docx"):
+                    doc_meta["doc_type"] = "DOCX"
+                    words = len(extracted_text.split())
+                    doc_meta["page_count"] = max(1, round(words / 250))
+                elif fname_lower.endswith(".csv"):
+                    doc_meta["doc_type"] = "CSV"
+                    doc_meta["row_count"] = max(0, extracted_text.count("\n") - 1)
+                elif fname_lower.endswith(".txt"):
+                    doc_meta["doc_type"] = "TXT"
+                    doc_meta["char_count"] = len(extracted_text)
+                elif fname_lower.endswith((".png", ".jpg", ".jpeg")):
+                    doc_meta["doc_type"] = "Image"
+                    doc_meta["image_count"] = 1
+                else:
+                    doc_meta["doc_type"] = "Document"
+
+                # Save to persistent database
+                save_document(
+                    user_id=st.session_state.user_id,
+                    filename=uploaded_file.name,
+                    content=file_bytes,
+                    extracted_text=extracted_text,
+                    metadata=doc_meta,
+                )
+
+            if not combined_text.strip():
+                st.error("No readable text was found. Upload text-based or valid PDF/DOCX files.")
                 st.stop()
-            st.session_state.documents[uploaded_file.name] = extracted_text
             
             try:
-                if is_csv:
-                    insights_dict = parse_batch_with_gemini(extracted_text)
+                if is_csv_batch:
+                    insights_dict = parse_batch_with_gemini(combined_text)
                 else:
-                    insights_dict = parse_document_with_gemini(extracted_text)
+                    insights_dict = parse_document_with_gemini(combined_text)
             except Exception as e:
                 st.error(f"Failed to process and analyze document: {e}")
                 st.stop()
                 
         with st.spinner("Running XGBoost Risk Model..."):
-            if is_csv:
+            if is_csv_batch:
                 batch_projects = []
                 for i, proj in enumerate(insights_dict.get("projects", [])):
                     features = proj.get("features", {})
