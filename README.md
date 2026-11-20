@@ -6,8 +6,13 @@
 ![XGBoost](https://img.shields.io/badge/ML-XGBoost%20%7C%20CatBoost-orange.svg)
 ![Gemini](https://img.shields.io/badge/GenAI-Google%20Gemini-8E75B2.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Render-46E3B7.svg)](https://ai-project-1-fv95.onrender.com/)
 
 An end-to-end platform that predicts project risk, forecasts schedule delays, analyses task dependencies and answers questions about project documents using Machine Learning and a RAG-based Generative AI assistant. It supports separate workflows for **IT** and **Non-IT** projects, with role-based access for different job functions.
+
+**Live Demo:** [https://ai-project-1-fv95.onrender.com/](https://ai-project-1-fv95.onrender.com/)
+
+> Hosted on a free Render instance, so the first load may take 30-60 seconds if the app has been idle.
 
 ---
 
